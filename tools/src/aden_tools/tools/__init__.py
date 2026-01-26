@@ -32,6 +32,7 @@ from .file_system_toolkits.apply_diff import register_tools as register_apply_di
 from .file_system_toolkits.apply_patch import register_tools as register_apply_patch
 from .file_system_toolkits.grep_search import register_tools as register_grep_search
 from .file_system_toolkits.execute_command_tool import register_tools as register_execute_command
+from .audit_trail_tool import register_tools as register_audit_trail
 
 
 def register_all_tools(
@@ -53,6 +54,7 @@ def register_all_tools(
     register_example(mcp)
     register_web_scrape(mcp)
     register_pdf_read(mcp)
+    register_audit_trail(mcp)
 
     # Tools that need credentials (pass credentials if provided)
     # web_search handles both credential sources internally:
@@ -75,6 +77,7 @@ def register_all_tools(
         "web_search",
         "web_scrape",
         "pdf_read",
+        "audit_trail",
         "view_file",
         "write_to_file",
         "list_dir",

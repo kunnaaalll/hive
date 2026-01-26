@@ -33,9 +33,10 @@ if ! command -v python &> /dev/null && ! command -v python3 &> /dev/null; then
 fi
 
 # Use python3 if available, otherwise python
-PYTHON_CMD="python3"
-if ! command -v python3 &> /dev/null; then
-    PYTHON_CMD="python"
+if command -v python3.11 &> /dev/null; then
+    PYTHON_CMD="python3.11"
+else
+    PYTHON_CMD="python3"
 fi
 
 # Check Python version
