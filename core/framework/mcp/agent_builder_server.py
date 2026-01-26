@@ -9,6 +9,9 @@ Usage:
 
 import json
 import os
+import contextvars
+import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -38,7 +41,7 @@ class BuildSession:
     """Build session with persistence support."""
 
     def __init__(self, name: str, session_id: str | None = None):
-        self.id = session_id or f"build_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.id = session_id or f"build_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         self.name = name
         self.goal: Goal | None = None
         self.nodes: list[NodeSpec] = []
@@ -106,72 +109,130 @@ class BuildSession:
         return session
 
 
-# Global session
-_session: BuildSession | None = None
+# Session Context (thread-safe/task-safe storage)
+_active_session_var = contextvars.ContextVar("active_session", default=None)
 
 
-def _ensure_sessions_dir():
-    """Ensure sessions directory exists."""
-    SESSIONS_DIR.mkdir(exist_ok=True)
+class SessionManager:
+    """
+    Manages session persistence and access with thread safety.
+    """
+    _lock = threading.Lock()
 
+    @staticmethod
+    def ensure_sessions_dir():
+        """Ensure sessions directory exists."""
+        SESSIONS_DIR.mkdir(exist_ok=True)
 
-def _save_session(session: BuildSession):
-    """Save session to disk."""
-    _ensure_sessions_dir()
+    @classmethod
+    def save_session(cls, session: BuildSession):
+        """Save session to disk."""
+        with cls._lock:
+            cls.ensure_sessions_dir()
+            
+            # Update last modified
+            session.last_modified = datetime.now().isoformat()
+            
+            # Save session file
+            session_file = SESSIONS_DIR / f"{session.id}.json"
+            with open(session_file, "w") as f:
+                json.dump(session.to_dict(), f, indent=2, default=str)
+            
+            # Update active session pointer
+            with open(ACTIVE_SESSION_FILE, "w") as f:
+                f.write(session.id)
+                
+            # Update context
+            _active_session_var.set(session)
 
-    # Update last modified
-    session.last_modified = datetime.now().isoformat()
+    @classmethod
+    def load_session(cls, session_id: str) -> BuildSession:
+        """Load session from disk."""
+        with cls._lock:
+            session_file = SESSIONS_DIR / f"{session_id}.json"
+            if not session_file.exists():
+                raise ValueError(f"Session '{session_id}' not found")
 
-    # Save session file
-    session_file = SESSIONS_DIR / f"{session.id}.json"
-    with open(session_file, "w") as f:
-        json.dump(session.to_dict(), f, indent=2, default=str)
+            with open(session_file, "r") as f:
+                data = json.load(f)
 
-    # Update active session pointer
-    with open(ACTIVE_SESSION_FILE, "w") as f:
-        f.write(session.id)
+            session = BuildSession.from_dict(data)
+            _active_session_var.set(session)
+            
+            # Update active session pointer
+            cls.ensure_sessions_dir()
+            with open(ACTIVE_SESSION_FILE, "w") as f:
+                f.write(session.id)
+                
+            return session
 
+    @classmethod
+    def load_active_session(cls) -> BuildSession | None:
+        """Load the active session from disk pointer."""
+        if not ACTIVE_SESSION_FILE.exists():
+            return None
 
-def _load_session(session_id: str) -> BuildSession:
-    """Load session from disk."""
-    session_file = SESSIONS_DIR / f"{session_id}.json"
-    if not session_file.exists():
-        raise ValueError(f"Session '{session_id}' not found")
+        try:
+            with cls._lock:
+                with open(ACTIVE_SESSION_FILE, "r") as f:
+                    session_id = f.read().strip()
+            
+            if session_id:
+                # load_session handles the lock internally, but we're already holding it? 
+                # No, standard lock is not reentrant. We should be careful.
+                # Actually, reading the ID is quick. We release lock then call load_session.
+                pass
+            else:
+                return None
+                
+            return cls.load_session(session_id)
+        except Exception:
+            return None
 
-    with open(session_file, "r") as f:
-        data = json.load(f)
-
-    return BuildSession.from_dict(data)
-
-
-def _load_active_session() -> BuildSession | None:
-    """Load the active session if one exists."""
-    if not ACTIVE_SESSION_FILE.exists():
-        return None
-
-    try:
-        with open(ACTIVE_SESSION_FILE, "r") as f:
-            session_id = f.read().strip()
-
-        if session_id:
-            return _load_session(session_id)
-    except Exception:
-        pass
-
-    return None
+    @classmethod
+    def delete_session(cls, session_id: str) -> bool:
+        """Delete a session."""
+        with cls._lock:
+            session_file = SESSIONS_DIR / f"{session_id}.json"
+            if not session_file.exists():
+                return False
+                
+            session_file.unlink()
+            
+            # Clear active session if it was the deleted one
+            active_session = _active_session_var.get()
+            if active_session and active_session.id == session_id:
+                _active_session_var.set(None)
+                
+            if ACTIVE_SESSION_FILE.exists():
+                with open(ACTIVE_SESSION_FILE, "r") as f:
+                    active_id = f.read().strip()
+                if active_id == session_id:
+                    ACTIVE_SESSION_FILE.unlink()
+            
+            return True
 
 
 def get_session() -> BuildSession:
-    global _session
-
-    # Try to load active session if no session in memory
-    if _session is None:
-        _session = _load_active_session()
-
-    if _session is None:
-        raise ValueError("No active session. Call create_session first.")
-
-    return _session
+    """
+    Get the current active session.
+    
+    Priority:
+    1. ContextVar (current request/task)
+    2. Active session on disk (persistence)
+    """
+    # 1. Check ContextVar
+    session = _active_session_var.get()
+    if session:
+        return session
+        
+    # 2. Try to load active session from disk
+    session = SessionManager.load_active_session()
+    if session:
+        # load_active_session already sets the ContextVar
+        return session
+        
+    raise ValueError("No active session. Call create_session first.")
 
 
 # =============================================================================
@@ -181,11 +242,10 @@ def get_session() -> BuildSession:
 @mcp.tool()
 def create_session(name: Annotated[str, "Name for the agent being built"]) -> str:
     """Create a new agent building session. Call this first before building an agent."""
-    global _session
-    _session = BuildSession(name)
-    _save_session(_session)  # Auto-save
+    session = BuildSession(name)
+    SessionManager.save_session(session)  # Auto-save & set active
     return json.dumps({
-        "session_id": _session.id,
+        "session_id": session.id,
         "name": name,
         "status": "created",
         "persisted": True,
@@ -195,7 +255,7 @@ def create_session(name: Annotated[str, "Name for the agent being built"]) -> st
 @mcp.tool()
 def list_sessions() -> str:
     """List all saved agent building sessions."""
-    _ensure_sessions_dir()
+    SessionManager.ensure_sessions_dir()
 
     sessions = []
     if SESSIONS_DIR.exists():
@@ -234,25 +294,20 @@ def list_sessions() -> str:
 @mcp.tool()
 def load_session_by_id(session_id: Annotated[str, "ID of the session to load"]) -> str:
     """Load a previously saved agent building session by its ID."""
-    global _session
-
     try:
-        _session = _load_session(session_id)
-
-        # Update active session pointer
-        with open(ACTIVE_SESSION_FILE, "w") as f:
-            f.write(session_id)
+        session = SessionManager.load_session(session_id)
+        # load_session handles updating context and active file pointer
 
         return json.dumps({
             "success": True,
-            "session_id": _session.id,
-            "name": _session.name,
-            "node_count": len(_session.nodes),
-            "edge_count": len(_session.edges),
-            "has_goal": _session.goal is not None,
-            "created_at": _session.created_at,
-            "last_modified": _session.last_modified,
-            "message": f"Session '{_session.name}' loaded successfully"
+            "session_id": session.id,
+            "name": session.name,
+            "node_count": len(session.nodes),
+            "edge_count": len(session.edges),
+            "has_goal": session.goal is not None,
+            "created_at": session.created_at,
+            "last_modified": session.last_modified,
+            "message": f"Session '{session.name}' loaded successfully"
         })
     except Exception as e:
         return json.dumps({
@@ -264,29 +319,14 @@ def load_session_by_id(session_id: Annotated[str, "ID of the session to load"]) 
 @mcp.tool()
 def delete_session(session_id: Annotated[str, "ID of the session to delete"]) -> str:
     """Delete a saved agent building session."""
-    global _session
-
-    session_file = SESSIONS_DIR / f"{session_id}.json"
-    if not session_file.exists():
-        return json.dumps({
-            "success": False,
-            "error": f"Session '{session_id}' not found"
-        })
-
     try:
-        # Remove session file
-        session_file.unlink()
-
-        # Clear active session if it was the deleted one
-        if _session and _session.id == session_id:
-            _session = None
-
-        if ACTIVE_SESSION_FILE.exists():
-            with open(ACTIVE_SESSION_FILE, "r") as f:
-                active_id = f.read().strip()
-                if active_id == session_id:
-                    ACTIVE_SESSION_FILE.unlink()
-
+        success = SessionManager.delete_session(session_id)
+        if not success:
+            return json.dumps({
+                "success": False,
+                "error": f"Session '{session_id}' not found"
+            })
+            
         return json.dumps({
             "success": True,
             "deleted_session_id": session_id,
@@ -402,7 +442,7 @@ def set_goal(
         constraints=constraint_objs,
     )
 
-    _save_session(session)  # Auto-save
+    SessionManager.save_session(session)  # Auto-save
 
     return json.dumps({
         "valid": len(errors) == 0,
@@ -541,7 +581,7 @@ def add_node(
     if node_type in ("llm_generate", "llm_tool_use") and not system_prompt:
         warnings.append(f"LLM node '{node_id}' should have a system_prompt")
 
-    _save_session(session)  # Auto-save
+    SessionManager.save_session(session)  # Auto-save
 
     return json.dumps({
         "valid": len(errors) == 0,
@@ -619,7 +659,7 @@ def add_edge(
     if edge_condition == EdgeCondition.CONDITIONAL and not condition_expr:
         errors.append(f"Conditional edge '{edge_id}' needs condition_expr")
 
-    _save_session(session)  # Auto-save
+    SessionManager.save_session(session)  # Auto-save
 
     return json.dumps({
         "valid": len(errors) == 0,
@@ -711,7 +751,7 @@ def update_node(
     if node.node_type in ("llm_generate", "llm_tool_use") and not node.system_prompt:
         warnings.append(f"LLM node '{node_id}' should have a system_prompt")
 
-    _save_session(session)  # Auto-save
+    SessionManager.save_session(session)  # Auto-save
 
     return json.dumps({
         "valid": len(errors) == 0,
@@ -770,7 +810,7 @@ def delete_node(
         if not (e.source == node_id or e.target == node_id)
     ]
 
-    _save_session(session)  # Auto-save
+    SessionManager.save_session(session)  # Auto-save
 
     return json.dumps({
         "valid": True,
@@ -802,7 +842,7 @@ def delete_edge(
     # Remove the edge
     removed_edge = session.edges.pop(edge_idx)
 
-    _save_session(session)  # Auto-save
+    SessionManager.save_session(session)  # Auto-save
 
     return json.dumps({
         "valid": True,
@@ -1555,7 +1595,7 @@ def add_mcp_server(
 
             # Add to session
             session.mcp_servers.append(server_config)
-            _save_session(session)  # Auto-save
+            SessionManager.save_session(session)  # Auto-save
 
             return json.dumps({
                 "success": True,
@@ -1675,7 +1715,7 @@ def remove_mcp_server(
     for i, server in enumerate(session.mcp_servers):
         if server["name"] == name:
             session.mcp_servers.pop(i)
-            _save_session(session)  # Auto-save
+            SessionManager.save_session(session)  # Auto-save
             return json.dumps({
                 "success": True,
                 "removed": name,
@@ -2414,8 +2454,12 @@ def generate_constraint_tests(
         return json.dumps({"error": f"Invalid goal JSON: {e}"})
 
     # Derive agent_path from session if not provided
-    if not agent_path and _session:
-        agent_path = f"exports/{_session.name}"
+    if not agent_path:
+        try:
+            session = get_session()
+            agent_path = f"exports/{session.name}"
+        except ValueError:
+            pass
 
     if not agent_path:
         return json.dumps({"error": "agent_path required (e.g., 'exports/my_agent')"})
@@ -2490,8 +2534,12 @@ def generate_success_tests(
         return json.dumps({"error": f"Invalid goal JSON: {e}"})
 
     # Derive agent_path from session if not provided
-    if not agent_path and _session:
-        agent_path = f"exports/{_session.name}"
+    if not agent_path:
+        try:
+            session = get_session()
+            agent_path = f"exports/{session.name}"
+        except ValueError:
+            pass
 
     if not agent_path:
         return json.dumps({"error": "agent_path required (e.g., 'exports/my_agent')"})
@@ -2744,8 +2792,12 @@ def debug_test(
     import re
 
     # Derive agent_path from session if not provided
-    if not agent_path and _session:
-        agent_path = f"exports/{_session.name}"
+    if not agent_path:
+        try:
+            session = get_session()
+            agent_path = f"exports/{session.name}"
+        except ValueError:
+            pass
 
     if not agent_path:
         return json.dumps({"error": "agent_path required (e.g., 'exports/my_agent')"})
@@ -2869,8 +2921,12 @@ def list_tests(
     import ast
 
     # Derive agent_path from session if not provided
-    if not agent_path and _session:
-        agent_path = f"exports/{_session.name}"
+    if not agent_path:
+        try:
+            session = get_session()
+            agent_path = f"exports/{session.name}"
+        except ValueError:
+            pass
 
     if not agent_path:
         return json.dumps({"error": "agent_path required (e.g., 'exports/my_agent')"})
