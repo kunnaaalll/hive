@@ -16,7 +16,6 @@ Use when you need to read the content of a specific URL, extract data from a web
 | `max_length` | int | No | `50000` | Maximum length of extracted content (1000-500000) |
 | `render_js` | bool | No | `False` | Enable dynamic rendering using Playwright (required for modern JS-heavy sites) |
 | `output_format` | str | No | `"text"` | Format of extracted content: `"text"` or `"markdown"` |
-| `screenshot` | bool | No | `False` | If True, saves a screenshot of the page to `exports/screenshots/` |
 
 ## Environment Variables
 
@@ -25,6 +24,7 @@ This tool does not require any environment variables.
 ## Error Handling
 
 Returns error dicts for common issues:
+- `Security violation: <error>` - URL blocked due to safety rules (SSRF protection)
 - `HTTP <status>: Failed to fetch URL` - Server returned error status
 - `No elements found matching selector: <selector>` - CSS selector matched nothing
 - `Scraping failed: <error>` - Playwright or parsing error
@@ -35,4 +35,4 @@ Returns error dicts for common issues:
 - **Dynamic Mode**: Use `render_js=True` for sites built with React, Next.js, etc.
 - **Markdown**: Use `output_format="markdown"` to preserve semantic structure (headers, tables).
 - **Ethics**: Automatically respects `robots.txt` rules and identifies as `AdenBot/1.0`.
-- **Debugging**: Screenshots are saved as PNG files in the project root's `exports/screenshots/` folder.
+- **Security**: For safety, the tool blocks access to internal/private IP addresses (localhost, private network, etc.).

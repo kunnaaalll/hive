@@ -1,6 +1,7 @@
 import asyncio
 import os
-import base64
+import ipaddress
+import socket
 from typing import Any, List
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
@@ -18,6 +19,54 @@ USER_AGENT = "AdenBot/1.0 (https://adenhq.com; web scraping tool)"
 
 # Browser-like User-Agent for actual page requests
 BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+
+def _is_internal_ip(hostname: str) -> bool:
+    """
+    Check if a hostname resolves to a private or loopback IP address.
+    """
+    try:
+        # Check if it's already an IP
+        ip = ipaddress.ip_address(hostname)
+        return ip.is_private or ip.is_loopback or ip.is_link_local
+    except ValueError:
+        # Not a direct IP, try to resolve
+        try:
+            # We use 80 as a dummy port for better resolution compatibility
+            addr_info = socket.getaddrinfo(hostname, 80)
+            for item in addr_info:
+                ip_str = item[4][0]
+                ip = ipaddress.ip_address(ip_str)
+                if ip.is_private or ip.is_loopback or ip.is_link_local:
+                    return True
+            return False # All resolved IPs are public
+        except (socket.gaierror, ValueError):
+            # If we can't resolve it, check for common local names
+            local_names = ("localhost", "localhost.localdomain", "local")
+            if hostname.lower().strip(".") in local_names:
+                return True
+            return False # Allow it to proceed, Playwright/httpx will fail naturally if it's invalid
+
+
+def _validate_url_security(url: str) -> tuple[bool, str]:
+    """
+    Validate URL to prevent SSRF and unsafe protocols.
+    """
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False, f"Unsupported protocol: {parsed.scheme}. Only http/https are allowed."
+        
+        hostname = parsed.hostname
+        if not hostname:
+            return False, "Invalid URL: No hostname found."
+            
+        if _is_internal_ip(hostname):
+            return False, f"Access to internal/private address is blocked: {hostname}"
+            
+        return True, ""
+    except Exception as e:
+        return False, f"URL validation failed: {str(e)}"
 
 
 async def _get_robots_parser_async(base_url: str, timeout: float = 10.0) -> RobotFileParser | None:
@@ -80,7 +129,6 @@ def register_tools(mcp: FastMCP) -> None:
         respect_robots_txt: bool = True,
         render_js: bool = False,
         output_format: str = "text",
-        screenshot: bool = False,
     ) -> dict:
         """
         Scrape and extract content from a webpage. Supports dynamic rendering and Markdown.
@@ -95,14 +143,22 @@ def register_tools(mcp: FastMCP) -> None:
             respect_robots_txt: Whether to respect robots.txt rules (default: True)
             render_js: Enable dynamic rendering using Playwright (required for SPAs)
             output_format: Format of the content ('text' or 'markdown')
-            screenshot: If True, saves a screenshot to the exports directory
         """
         try:
-            # Validate URL
-            if not url.startswith(("http://", "https://")):
+            # 1. Validation of the raw input
+            parsed_raw = urlparse(url)
+            
+            # If no scheme, default to https
+            if not parsed_raw.scheme:
                 url = "https://" + url
+                parsed_raw = urlparse(url)
 
-            # Check robots.txt if enabled
+            # 2. SSRF Protection & Protocol Validation
+            allowed_url, error_msg = _validate_url_security(url)
+            if not allowed_url:
+                return {"error": f"Security violation: {error_msg}", "url": url}
+
+            # 3. Check robots.txt if enabled
             if respect_robots_txt:
                 allowed, reason = await _is_allowed_by_robots_async(url)
                 if not allowed:
@@ -119,7 +175,6 @@ def register_tools(mcp: FastMCP) -> None:
             html_content = ""
             page_title = ""
             page_description = ""
-            screenshot_path = ""
             resolved_url = url
 
             if render_js:
@@ -135,20 +190,13 @@ def register_tools(mcp: FastMCP) -> None:
                         page_title = await page.title()
                         resolved_url = page.url
                         
-                        # Get description from meta
-                        meta_desc = await page.get_attribute('meta[name="description"]', "content")
-                        if meta_desc:
-                            page_description = meta_desc
-                            
-                        if screenshot:
-                            # Create exports directory if it doesn't exist
-                            # Since we are in tool, we assume we want to save in the project root exports
-                            exports_dir = os.path.join(os.getcwd(), "exports", "screenshots")
-                            os.makedirs(exports_dir, exist_ok=True)
-                            
-                            filename = f"scrape_{int(asyncio.get_event_loop().time())}.png"
-                            screenshot_path = os.path.join(exports_dir, filename)
-                            await page.screenshot(path=screenshot_path)
+                        # Get description from meta (optional, don't wait/timeout)
+                        try:
+                            meta_desc_handle = await page.query_selector('meta[name="description"]')
+                            if meta_desc_handle:
+                                page_description = await meta_desc_handle.get_attribute("content") or ""
+                        except Exception:
+                            page_description = ""
                             
                     finally:
                         await browser.close()
@@ -222,9 +270,6 @@ def register_tools(mcp: FastMCP) -> None:
                 "format": output_format,
             }
             
-            if screenshot_path:
-                result["screenshot"] = screenshot_path
-
             if include_links:
                 links = []
                 for a in soup.find_all("a", href=True)[:50]:
