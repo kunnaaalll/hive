@@ -73,7 +73,7 @@ python mcp_server.py
 | `grep_search`          | Search file contents with regex                |
 | `execute_command_tool` | Execute shell commands                         |
 | `web_search`           | Search the web (Google or Brave, auto-detected) |
-| `web_scrape`           | Scrape and extract content from webpages       |
+| `web_scrape`           | Scrape webpages with dynamic JS rendering & Markdown support |
 | `pdf_read`             | Read and extract text from PDF files           |
 
 ## Project Structure

@@ -14,6 +14,9 @@ COPY mcp_server.py ./
 # Install package with all dependencies
 RUN pip install --no-cache-dir -e .
 
+# Install Playwright browsers and system dependencies
+RUN playwright install --with-deps chromium
+
 # Create non-root user for security
 RUN useradd -m -u 1001 appuser
 

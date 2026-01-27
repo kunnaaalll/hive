@@ -145,6 +145,19 @@ else
 fi
 echo ""
 
+# Install Playwright browsers (needed for web_scrape tool)
+echo "=================================================="
+echo "Installing Playwright Browsers"
+echo "=================================================="
+echo ""
+if ! $PYTHON_CMD -m playwright install chromium; then
+    echo -e "${YELLOW}⚠${NC} Playwright browser installation failed"
+    echo "Dynamic web scraping may not work until you run: playwright install chromium"
+else
+    echo -e "${GREEN}✓${NC} Playwright browsers installed"
+fi
+echo ""
+
 # Verify installations
 echo "=================================================="
 echo "Verifying Installation"

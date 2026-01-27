@@ -1,12 +1,6 @@
-"""
-Web Scrape Tool - Extract content from web pages.
-
-Uses httpx for requests and BeautifulSoup for HTML parsing.
-Returns clean text content from web pages.
-Respect robots.txt by default for ethical scraping.
-"""
-from __future__ import annotations
-
+import asyncio
+import os
+import base64
 from typing import Any, List
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
@@ -14,6 +8,7 @@ from urllib.robotparser import RobotFileParser
 import httpx
 from bs4 import BeautifulSoup
 from fastmcp import FastMCP
+from markdownify import markdownify as md
 
 # Cache for robots.txt parsers (domain -> parser)
 _robots_cache: dict[str, RobotFileParser | None] = {}
@@ -25,16 +20,9 @@ USER_AGENT = "AdenBot/1.0 (https://adenhq.com; web scraping tool)"
 BROWSER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
-def _get_robots_parser(base_url: str, timeout: float = 10.0) -> RobotFileParser | None:
+async def _get_robots_parser_async(base_url: str, timeout: float = 10.0) -> RobotFileParser | None:
     """
-    Fetch and parse robots.txt for a domain.
-    
-    Args:
-        base_url: Base URL of the domain (e.g., 'https://example.com')
-        timeout: Timeout for fetching robots.txt
-        
-    Returns:
-        RobotFileParser if robots.txt exists and was parsed, None otherwise
+    Fetch and parse robots.txt for a domain asynchronously.
     """
     if base_url in _robots_cache:
         return _robots_cache[base_url]
@@ -43,46 +31,37 @@ def _get_robots_parser(base_url: str, timeout: float = 10.0) -> RobotFileParser 
     parser = RobotFileParser()
     
     try:
-        response = httpx.get(
-            robots_url,
-            headers={"User-Agent": USER_AGENT},
-            follow_redirects=True,
-            timeout=timeout,
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                robots_url,
+                headers={"User-Agent": USER_AGENT},
+                follow_redirects=True,
+                timeout=timeout,
+            )
         if response.status_code == 200:
             parser.parse(response.text.splitlines())
             _robots_cache[base_url] = parser
             return parser
         else:
-            # No robots.txt or error (4xx/5xx) - allow all by convention
             _robots_cache[base_url] = None
             return None
     except (httpx.TimeoutException, httpx.RequestError):
-        # Can't fetch robots.txt - allow but don't cache (might be temporary)
         return None
 
 
-def _is_allowed_by_robots(url: str) -> tuple[bool, str]:
+async def _is_allowed_by_robots_async(url: str) -> tuple[bool, str]:
     """
-    Check if URL is allowed by robots.txt.
-    
-    Args:
-        url: Full URL to check
-        
-    Returns:
-        Tuple of (allowed: bool, reason: str)
+    Check if URL is allowed by robots.txt asynchronously.
     """
     parsed = urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
     path = parsed.path or "/"
     
-    parser = _get_robots_parser(base_url)
+    parser = await _get_robots_parser_async(base_url)
     
     if parser is None:
-        # No robots.txt found or couldn't fetch - all paths allowed
         return True, "No robots.txt found or not accessible"
     
-    # Check both our bot user-agent and wildcard
     if parser.can_fetch(USER_AGENT, path) and parser.can_fetch("*", path):
         return True, "Allowed by robots.txt"
     else:
@@ -93,28 +72,30 @@ def register_tools(mcp: FastMCP) -> None:
     """Register web scrape tools with the MCP server."""
 
     @mcp.tool()
-    def web_scrape(
+    async def web_scrape(
         url: str,
         selector: str | None = None,
         include_links: bool = False,
         max_length: int = 50000,
         respect_robots_txt: bool = True,
+        render_js: bool = False,
+        output_format: str = "text",
+        screenshot: bool = False,
     ) -> dict:
         """
-        Scrape and extract text content from a webpage.
+        Scrape and extract content from a webpage. Supports dynamic rendering and Markdown.
 
-        Use when you need to read the content of a specific URL,
-        extract data from a website, or read articles/documentation.
+        Use when you need to read content from modern SPAs, documentation, or articles.
 
         Args:
             url: URL of the webpage to scrape
-            selector: CSS selector to target specific content (e.g., 'article', '.main-content')
+            selector: CSS selector to target specific content
             include_links: Include extracted links in the response
-            max_length: Maximum length of extracted text (1000-500000)
+            max_length: Maximum length of extracted content (1000-500000)
             respect_robots_txt: Whether to respect robots.txt rules (default: True)
-
-        Returns:
-            Dict with scraped content (url, title, description, content, length) or error dict
+            render_js: Enable dynamic rendering using Playwright (required for SPAs)
+            output_format: Format of the content ('text' or 'markdown')
+            screenshot: If True, saves a screenshot to the exports directory
         """
         try:
             # Validate URL
@@ -123,7 +104,7 @@ def register_tools(mcp: FastMCP) -> None:
 
             # Check robots.txt if enabled
             if respect_robots_txt:
-                allowed, reason = _is_allowed_by_robots(url)
+                allowed, reason = await _is_allowed_by_robots_async(url)
                 if not allowed:
                     return {
                         "error": f"Scraping blocked: {reason}",
@@ -131,92 +112,121 @@ def register_tools(mcp: FastMCP) -> None:
                         "url": url,
                     }
 
-            # Validate max_length
-            if max_length < 1000:
-                max_length = 1000
-            elif max_length > 500000:
-                max_length = 500000
+            # Validate settings
+            if max_length < 1000: max_length = 1000
+            elif max_length > 500000: max_length = 500000
+            
+            html_content = ""
+            page_title = ""
+            page_description = ""
+            screenshot_path = ""
+            resolved_url = url
 
-            # Make request
-            response = httpx.get(
-                url,
-                headers={
-                    "User-Agent": BROWSER_USER_AGENT,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.5",
-                },
-                follow_redirects=True,
-                timeout=30.0,
-            )
+            if render_js:
+                from playwright.async_api import async_playwright
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True)
+                    context = await browser.new_context(user_agent=BROWSER_USER_AGENT)
+                    page = await context.new_page()
+                    
+                    try:
+                        await page.goto(url, wait_until="networkidle", timeout=60000)
+                        html_content = await page.content()
+                        page_title = await page.title()
+                        resolved_url = page.url
+                        
+                        # Get description from meta
+                        meta_desc = await page.get_attribute('meta[name="description"]', "content")
+                        if meta_desc:
+                            page_description = meta_desc
+                            
+                        if screenshot:
+                            # Create exports directory if it doesn't exist
+                            # Since we are in tool, we assume we want to save in the project root exports
+                            exports_dir = os.path.join(os.getcwd(), "exports", "screenshots")
+                            os.makedirs(exports_dir, exist_ok=True)
+                            
+                            filename = f"scrape_{int(asyncio.get_event_loop().time())}.png"
+                            screenshot_path = os.path.join(exports_dir, filename)
+                            await page.screenshot(path=screenshot_path)
+                            
+                    finally:
+                        await browser.close()
+            else:
+                # Static scrape using httpx
+                async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
+                    response = await client.get(
+                        url,
+                        headers={
+                            "User-Agent": BROWSER_USER_AGENT,
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        }
+                    )
+                
+                if response.status_code != 200:
+                    return {"error": f"HTTP {response.status_code}: Failed to fetch URL"}
 
-            if response.status_code != 200:
-                return {"error": f"HTTP {response.status_code}: Failed to fetch URL"}
+                content_type = response.headers.get("content-type", "").lower()
+                if not any(t in content_type for t in ["text/html", "application/xhtml+xml"]):
+                    return {"error": f"Skipping non-HTML content ({content_type})", "url": url}
+                
+                html_content = response.text
+                resolved_url = str(response.url)
 
-            # --- START FIX: Validate Content-Type ---
-            # Added validation to prevent parsing non-HTML content (like JSON, PDF, Images)
-            content_type = response.headers.get("content-type", "").lower()
-            if not any(t in content_type for t in ["text/html", "application/xhtml+xml"]):
-                return {
-                    "error": f"Skipping non-HTML content (Content-Type: {content_type})",
-                    "url": url,
-                    "skipped": True
-                }
-            # --- END FIX ---
+            # Process HTML with BeautifulSoup for cleaning / extraction
+            soup = BeautifulSoup(html_content, "html.parser")
+            
+            if not render_js:
+                title_tag = soup.find("title")
+                if title_tag: page_title = title_tag.get_text(strip=True)
+                
+                meta_desc = soup.find("meta", attrs={"name": "description"})
+                if meta_desc: page_description = meta_desc.get("content", "")
 
-            # Parse HTML
-            soup = BeautifulSoup(response.text, "html.parser")
-
-            # Remove noise elements
+            # Remove noise
             for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]):
                 tag.decompose()
-
-            # Get title and description
-            title = ""
-            title_tag = soup.find("title")
-            if title_tag:
-                title = title_tag.get_text(strip=True)
-
-            description = ""
-            meta_desc = soup.find("meta", attrs={"name": "description"})
-            if meta_desc:
-                description = meta_desc.get("content", "")
 
             # Target content
             if selector:
                 content_elem = soup.select_one(selector)
                 if not content_elem:
                     return {"error": f"No elements found matching selector: {selector}"}
-                text = content_elem.get_text(separator=" ", strip=True)
+                target_html = str(content_elem)
             else:
-                # Auto-detect main content
                 main_content = (
-                    soup.find("article")
-                    or soup.find("main")
-                    or soup.find(attrs={"role": "main"})
-                    or soup.find(class_=["content", "post", "entry", "article-body"])
-                    or soup.find("body")
+                    soup.find("article") or soup.find("main") or 
+                    soup.find(attrs={"role": "main"}) or 
+                    soup.find(class_=["content", "post", "entry"]) or 
+                    soup.find("body")
                 )
-                text = main_content.get_text(separator=" ", strip=True) if main_content else ""
+                target_html = str(main_content) if main_content else html_content
 
-            # Clean up whitespace
-            text = " ".join(text.split())
+            # Convert to results
+            if output_format.lower() == "markdown":
+                content = md(target_html, heading_style="ATX")
+            else:
+                content = BeautifulSoup(target_html, "html.parser").get_text(separator=" ", strip=True)
 
-            # Truncate if needed
-            if len(text) > max_length:
-                text = text[:max_length] + "..."
+            # Cleanup whitespace
+            content = " ".join(content.split())
+            if len(content) > max_length:
+                content = content[:max_length] + "..."
 
-            result: dict[str, Any] = {
-                "url": str(response.url),
-                "title": title,
-                "description": description,
-                "content": text,
-                "length": len(text),
-                "robots_txt_respected": respect_robots_txt,
+            result = {
+                "url": resolved_url,
+                "title": page_title,
+                "description": page_description,
+                "content": content,
+                "length": len(content),
+                "format": output_format,
             }
+            
+            if screenshot_path:
+                result["screenshot"] = screenshot_path
 
-            # Extract links if requested
             if include_links:
-                links: List[dict[str, str]] = []
+                links = []
                 for a in soup.find_all("a", href=True)[:50]:
                     href = a["href"]
                     link_text = a.get_text(strip=True)
@@ -226,9 +236,5 @@ def register_tools(mcp: FastMCP) -> None:
 
             return result
 
-        except httpx.TimeoutException:
-            return {"error": "Request timed out"}
-        except httpx.RequestError as e:
-            return {"error": f"Network error: {str(e)}"}
         except Exception as e:
             return {"error": f"Scraping failed: {str(e)}"}
