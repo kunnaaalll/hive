@@ -76,6 +76,7 @@ class GraphExecutor:
         node_registry: dict[str, NodeProtocol] | None = None,
         approval_callback: Callable | None = None,
         cleansing_config: CleansingConfig | None = None,
+        debug_hook: Callable | None = None,
     ):
         """
         Initialize the executor.
@@ -88,6 +89,7 @@ class GraphExecutor:
             node_registry: Custom node implementations by ID
             approval_callback: Optional callback for human-in-the-loop approval
             cleansing_config: Optional output cleansing configuration
+            debug_hook: Optional callback for debugging (pre-step inspection)
         """
         self.runtime = runtime
         self.llm = llm
@@ -95,6 +97,7 @@ class GraphExecutor:
         self.tool_executor = tool_executor
         self.node_registry = node_registry or {}
         self.approval_callback = approval_callback
+        self.debug_hook = debug_hook
         self.validator = OutputValidator()
         self.logger = logging.getLogger(__name__)
 
@@ -229,6 +232,21 @@ class GraphExecutor:
                     raise RuntimeError(f"Node not found: {current_node_id}")
 
                 path.append(current_node_id)
+
+                # DEBUG HOOK
+                if self.debug_hook:
+                    # Build preliminary context for inspection
+                    # Note: This is re-built properly later, but meaningful for debug now
+                    debug_ctx = {
+                        "inputs": input_data or {},
+                        "goal": goal.dict(),
+                    }
+                    self.debug_hook(
+                        node_id=current_node_id,
+                        node_spec=node_spec,
+                        context=debug_ctx,
+                        memory=memory.read_all()
+                    )
 
                 # Check if pause (HITL) before execution
                 if current_node_id in graph.pause_nodes:
