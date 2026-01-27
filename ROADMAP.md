@@ -78,7 +78,7 @@ timeline
 - [ ] Natively Support data validation of LLMs output with Pydantic
 
 ### Developer Experience
-- [ ] **Debugging mode**
+- [x] **Debugging mode**
 - [ ] **Documentation**
     - [ ] Quick start guide
     - [ ] Goal creation guide
