@@ -80,8 +80,8 @@ def _clean_schema_for_llm(schema: dict[str, Any]) -> dict[str, Any]:
     cleaned = schema.copy()
 
     # Remove unsupported root fields
-    for field in ["title", "description", "$schema", "$id"]:
-        cleaned.pop(field, None)
+    for f in ["title", "description", "$schema", "$id"]:
+        cleaned.pop(f, None)
 
     # Enforce strict properties
     if "type" in cleaned and cleaned["type"] == "object":
@@ -661,7 +661,9 @@ class LLMNode(NodeProtocol):
                 # Phase 3: Auto-generate JSON schema from Pydantic model
                 response_format = None
                 if ctx.node_spec.output_model is not None:
-                    json_schema = _clean_schema_for_llm(ctx.node_spec.output_model.model_json_schema())
+                    json_schema = _clean_schema_for_llm(
+                        ctx.node_spec.output_model.model_json_schema()
+                    )
                     response_format = {
                         "type": "json_schema",
                         "json_schema": {
@@ -689,7 +691,7 @@ class LLMNode(NodeProtocol):
                         stream_input_tokens = 0
                         stream_output_tokens = 0
                         stop_reason = ""
-                        
+
                         # Define callback for runtime events (optional)
                         def on_token(chunk):
                             # In future, hook this to runtime event bus
@@ -702,14 +704,14 @@ class LLMNode(NodeProtocol):
                             response_format=response_format,
                             callback=on_token
                         )
-                        
+
                         # Iterate and aggregate
                         async for chunk in stream:
                             full_content += chunk.content
                             stream_input_tokens = chunk.input_tokens # Usually set in chunks
                             stream_output_tokens = chunk.output_tokens
                             stop_reason = chunk.stop_reason or stop_reason
-                            
+
                         # Construct response object from aggregated data
                         from framework.llm.provider import LLMResponse
                         response = LLMResponse(

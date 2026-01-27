@@ -1,5 +1,5 @@
 """
 Debugger module for Aden Agent Framework.
 """
-from .session import DebugSession
-from .cli_interface import DebugCLI
+from .cli_interface import DebugCLI as DebugCLI
+from .session import DebugSession as DebugSession

@@ -94,13 +94,13 @@ class MockLLMProvider(LLMProvider):
         """
         if json_mode or response_format:
             keys = []
-            
+
             # Try to extract keys from response_format (OpenAI style)
             if response_format and response_format.get("type") == "json_schema":
                 schema = response_format.get("json_schema", {}).get("schema", {})
                 if "properties" in schema:
                     keys = list(schema["properties"].keys())
-            
+
             # Fallback to extraction from system prompt if needed
             if not keys:
                 keys = self._extract_output_keys(system)
@@ -179,19 +179,19 @@ class MockLLMProvider(LLMProvider):
         full_content = self._generate_mock_response(
             system=system, json_mode=json_mode, response_format=response_format
         )
-        
+
         # Simulate streaming by splitting by word
         words = full_content.split(" ")
         for i, word in enumerate(words):
             # Add back the space except for the last word
             chunk_content = word + (" " if i < len(words) - 1 else "")
-            
+
             # Simulated delay
             await asyncio.sleep(0.05)
-            
+
             is_complete = (i == len(words) - 1)
             stop_reason = "mock_complete" if is_complete else ""
-            
+
             chunk = StreamChunk(
                 content=chunk_content,
                 is_complete=is_complete,
@@ -200,10 +200,10 @@ class MockLLMProvider(LLMProvider):
                 model=self.model,
                 stop_reason=stop_reason,
             )
-            
+
             if callback:
                 callback(chunk)
-                
+
             yield chunk
 
     def complete_with_tools(

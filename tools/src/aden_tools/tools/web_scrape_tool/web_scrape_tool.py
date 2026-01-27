@@ -1,8 +1,5 @@
-import asyncio
-import os
 import ipaddress
 import socket
-from typing import Any, List
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -169,9 +166,11 @@ def register_tools(mcp: FastMCP) -> None:
                     }
 
             # Validate settings
-            if max_length < 1000: max_length = 1000
-            elif max_length > 500000: max_length = 500000
-            
+            if max_length < 1000:
+                max_length = 1000
+            elif max_length > 500000:
+                max_length = 500000
+
             html_content = ""
             page_title = ""
             page_description = ""
@@ -226,10 +225,12 @@ def register_tools(mcp: FastMCP) -> None:
             
             if not render_js:
                 title_tag = soup.find("title")
-                if title_tag: page_title = title_tag.get_text(strip=True)
+                if title_tag:
+                    page_title = title_tag.get_text(strip=True)
                 
                 meta_desc = soup.find("meta", attrs={"name": "description"})
-                if meta_desc: page_description = meta_desc.get("content", "")
+                if meta_desc:
+                    page_description = meta_desc.get("content", "")
 
             # Remove noise
             for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe"]):
