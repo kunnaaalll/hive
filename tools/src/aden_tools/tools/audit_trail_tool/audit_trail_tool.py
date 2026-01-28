@@ -1,7 +1,6 @@
 """
 Audit Trail Tool - Visualization of agent decisions and outcomes.
 """
-import os
 import json
 from datetime import datetime
 from pathlib import Path
