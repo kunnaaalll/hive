@@ -71,8 +71,3 @@ exports/*
 
 .venv
 agent_logs/
-
-# Documentation / Local files
-PROJECT_EXPLANATION.md
-PR_DESCRIPTION.md
-PR_LLM_STREAMING.md
