@@ -376,7 +376,16 @@ def test_ticket_categorization():
 - **PEP 8** - Follow Python style guide
 - **Type hints** - Use for function signatures and class attributes
 - **Docstrings** - Document classes and public functions
-- **Black** - Code formatter (run with `black .`)
+- **Ruff** - Linter and formatter (run with `ruff check .` and `ruff format .`)
+
+### Automated Linting (Recommended)
+
+Set up pre-commit hooks to automatically format code on commit:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
 
 ```python
 # Good
